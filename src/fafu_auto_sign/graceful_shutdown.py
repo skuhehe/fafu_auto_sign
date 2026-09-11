@@ -22,7 +22,7 @@ class GracefulShutdown:
         # 主循环
         while not shutdown.is_stopped():
             do_work()
-            shutdown.wait(900)  # 等待 15 分钟或直到收到信号
+            shutdown.wait(config.heartbeat_interval)  # 等待心跳间隔或直到收到信号
 
         print("优雅关闭完成")
     """

@@ -125,6 +125,9 @@ dmypy.json
 
 dorm.jpg
 
+# macOS 元数据
+.DS_Store
+
 .sisyphus/
 
 config.json

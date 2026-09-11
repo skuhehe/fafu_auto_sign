@@ -5,6 +5,7 @@
 """
 
 import logging
+import random
 
 from requests.exceptions import ConnectionError, RequestException
 
@@ -17,7 +18,26 @@ from fafu_auto_sign.services.notification_service import NotificationService
 from fafu_auto_sign.services.upload_service import UploadService
 
 
-def run(config_path: str = "config.json") -> None:
+def wait_random_sign_delay(
+    shutdown: GracefulShutdown,
+    min_seconds: int,
+    max_seconds: int,
+    logger: logging.Logger,
+) -> bool:
+    """在签到前随机等待，并允许通过退出信号提前结束等待。
+
+    返回:
+        如果等待期间收到退出信号则返回 True，否则返回 False。
+    """
+    delay_seconds = random.randint(min_seconds, max_seconds)
+    logger.info(
+        f"签到前随机等待 {delay_seconds} 秒 "
+        f"（范围 {min_seconds}-{max_seconds} 秒）"
+    )
+    return shutdown.wait(delay_seconds)
+
+
+def run(config_path: str = "config.json", once: bool = False) -> None:
     """运行自动签到守护进程。
 
     本函数初始化所有组件并运行主循环，执行以下操作：
@@ -31,6 +51,7 @@ def run(config_path: str = "config.json") -> None:
 
     参数:
         config_path: JSON 配置文件的路径。
+        once: 只扫描一次并最多处理一个匹配任务，然后退出。
     """
     # 1. 加载配置
     config = load_config(config_path)
@@ -63,6 +84,8 @@ def run(config_path: str = "config.json") -> None:
                 task_ids = task_service.get_pending_tasks()
 
                 if task_ids:
+                    if once:
+                        task_ids = task_ids[:1]
                     logger.info(f"发现 {len(task_ids)} 个待签到任务")
                     for task_id in task_ids:
                         if shutdown.is_stopped():
@@ -77,10 +100,23 @@ def run(config_path: str = "config.json") -> None:
 
                             logger.info(f"获取到签到位置：{task_details.position_name}")
 
-                            # 上传图片
-                            img_url = upload_service.upload_image(config.image_path)
-                            if not img_url:
-                                continue
+                            # 常驻模式在签到前随机等待；--once 模式跳过等待。
+                            if not once and wait_random_sign_delay(
+                                shutdown,
+                                config.sign_delay_min,
+                                config.sign_delay_max,
+                                logger,
+                            ):
+                                break
+
+                            img_url = None
+                            if config.image_upload_enabled:
+                                # 图片上传开关开启时才上传图片。
+                                img_url = upload_service.upload_image(config.image_path)
+                                if not img_url:
+                                    continue
+                            else:
+                                logger.info("图片上传已关闭，跳过图片上传")
 
                             # 提交签到（使用动态位置参数）
                             success = sign_service.submit_sign(
@@ -98,7 +134,10 @@ def run(config_path: str = "config.json") -> None:
                         except Exception as e:
                             logger.error(f"处理任务 {task_id} 时发生异常: {e}")
                 else:
-                    logger.info("心跳保活成功，未发现任务。睡眠 15 分钟...")
+                    if once:
+                        logger.info("单次运行未发现任务，程序退出。")
+                    else:
+                        logger.info("心跳保活成功，未发现任务。睡眠 15 分钟...")
 
             except ConnectionError as e:
                 logger.error(f"网络连接错误: {e}")
@@ -107,8 +146,11 @@ def run(config_path: str = "config.json") -> None:
             except Exception as e:
                 logger.error(f"发生异常: {e}")
 
-            # 等待15分钟或直到收到退出信号
-            if shutdown.wait(900):
+            if once:
+                break
+
+            # 等待心跳间隔（默认15分钟）或直到收到退出信号
+            if shutdown.wait(config.heartbeat_interval):
                 break
 
         logger.info("守护进程已停止")
