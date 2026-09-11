@@ -102,6 +102,18 @@ class TestSubmitSign:
         assert params["signImg"] == "http://example.com/image.jpg"
         assert params["signInPositionId"] == 516208
 
+    def test_submit_sign_without_image_omits_sign_img(self, sign_service, mock_client):
+        """关闭图片上传时，签到请求不应携带 signImg 参数。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_client.post.return_value = mock_response
+
+        result = sign_service.submit_sign(123, 516208, 118.237686, 25.077727)
+
+        assert result is True
+        params = mock_client.post.call_args.kwargs["params"]
+        assert "signImg" not in params
+
     def test_submit_sign_formats_coordinates_to_6_decimal_places(self, sign_service, mock_client):
         """测试坐标格式化为6位小数。"""
         # 准备

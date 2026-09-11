@@ -12,10 +12,15 @@ def main():
     parser.add_argument(
         "--config", "-c", default="config.json", help="配置文件路径 (默认: config.json)"
     )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="只扫描一次并最多处理一个匹配任务，然后退出（跳过签到前延迟）",
+    )
     args = parser.parse_args()
 
     try:
-        run(args.config)
+        run(args.config, once=args.once)
     except KeyboardInterrupt:
         print("\n程序被用户中断")
         sys.exit(0)

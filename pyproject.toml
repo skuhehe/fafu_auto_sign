@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-fafu-auto-sign = "fafu_auto_sign.main:main"
+fafu-auto-sign = "fafu_auto_sign.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/fafu_auto_sign"

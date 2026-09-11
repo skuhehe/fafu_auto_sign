@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BeforeValidator, Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,8 +37,11 @@ class AppConfig(BaseSettings):
     jitter: float = Field(default=0.00005, description="位置最大抖动量（0 到 0.001）")
     image_path: str = Field(default="dorm.jpg", description="宿舍照片路径")
     image_dir: Optional[str] = Field(default=None, description="图片目录路径（随机选择图片）")
+    image_upload_enabled: bool = Field(default=False, description="是否上传签到图片")
     base_url: str = Field(default="http://stuhtapi.fafu.edu.cn", description="API 基础 URL")
     heartbeat_interval: int = Field(default=900, description="心跳间隔（秒）")
+    sign_delay_min: int = Field(default=900, description="签到前最小随机等待时间（秒）")
+    sign_delay_max: int = Field(default=2700, description="签到前最大随机等待时间（秒）")
     log_level: str = Field(default="INFO", description="日志级别")
     # 通知配置
     notification_enabled: bool = Field(default=False, description="启用通知")
@@ -126,6 +129,21 @@ class AppConfig(BaseSettings):
             raise ValueError(f"抖动量必须在 0 到 0.001 之间，当前值: {v}")
         return v
 
+    @field_validator("sign_delay_min", "sign_delay_max")
+    @classmethod
+    def validate_sign_delay_non_negative(cls, v: int) -> int:
+        """验证签到延迟不能为负数。"""
+        if v < 0:
+            raise ValueError(f"签到延迟不能为负数，当前值: {v}")
+        return v
+
+    @model_validator(mode="after")
+    def validate_sign_delay_range(self) -> "AppConfig":
+        """验证签到延迟范围的最小值不大于最大值。"""
+        if self.sign_delay_min > self.sign_delay_max:
+            raise ValueError("签到延迟最小值不能大于最大值")
+        return self
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:
@@ -189,11 +207,25 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         config_dict["image_path"] = os.environ.get("FAFU_IMAGE_PATH")
     if os.environ.get("FAFU_IMAGE_DIR"):
         config_dict["image_dir"] = os.environ.get("FAFU_IMAGE_DIR")
+    image_upload_enabled_env = os.environ.get("FAFU_IMAGE_UPLOAD_ENABLED")
+    if image_upload_enabled_env:
+        config_dict["image_upload_enabled"] = image_upload_enabled_env.lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+        )
     if os.environ.get("FAFU_BASE_URL"):
         config_dict["base_url"] = os.environ.get("FAFU_BASE_URL")
     interval_env = os.environ.get("FAFU_HEARTBEAT_INTERVAL")
     if interval_env:
         config_dict["heartbeat_interval"] = int(interval_env)
+    sign_delay_min_env = os.environ.get("FAFU_SIGN_DELAY_MIN")
+    if sign_delay_min_env:
+        config_dict["sign_delay_min"] = int(sign_delay_min_env)
+    sign_delay_max_env = os.environ.get("FAFU_SIGN_DELAY_MAX")
+    if sign_delay_max_env:
+        config_dict["sign_delay_max"] = int(sign_delay_max_env)
     if os.environ.get("FAFU_LOG_LEVEL"):
         config_dict["log_level"] = os.environ.get("FAFU_LOG_LEVEL")
     notification_enabled_env = os.environ.get("FAFU_NOTIFICATION_ENABLED")
@@ -240,8 +272,11 @@ def create_example_config(path: str | Path = "config.json.example") -> None:
         "jitter": 0.00005,
         "image_path": "dorm.jpg",
         "image_dir": None,  # 设置为图片目录路径以启用随机选择功能
+        "image_upload_enabled": False,
         "base_url": "http://stuhtapi.fafu.edu.cn",
         "heartbeat_interval": 900,
+        "sign_delay_min": 900,
+        "sign_delay_max": 2700,
         "log_level": "INFO",
         "notification_enabled": False,
         "serverchan_key": None,  # Server酱 SendKey（以 SCT 开头）

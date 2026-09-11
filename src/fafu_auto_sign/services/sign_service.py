@@ -6,6 +6,7 @@
 
 import logging
 import random
+from typing import Optional
 
 from fafu_auto_sign.client import FAFUClient
 from fafu_auto_sign.config import AppConfig
@@ -37,7 +38,12 @@ class SignService:
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def submit_sign(
-        self, task_id: int, position_id: int, base_lng: float, base_lat: float, image_url: str
+        self,
+        task_id: int,
+        position_id: int,
+        base_lng: float,
+        base_lat: float,
+        image_url: Optional[str] = None,
     ) -> bool:
         """提交带 GPS 抖动的签到请求。
 
@@ -49,7 +55,7 @@ class SignService:
             position_id: 来自任务详情的签到位置 ID。
             base_lng: 来自任务详情的基础经度坐标。
             base_lat: 来自任务详情的基础纬度坐标。
-            image_url: 上传的签到图片 URL。
+            image_url: 上传的签到图片 URL。为 None 或空字符串时不提交图片字段。
 
         返回:
             如果签到成功（HTTP 200）返回 True，否则返回 False。
@@ -66,9 +72,10 @@ class SignService:
         params = {
             "lng": f"{lng:.6f}",
             "lat": f"{lat:.6f}",
-            "signImg": image_url,
             "signInPositionId": position_id,
         }
+        if image_url:
+            params["signImg"] = image_url
 
         self.logger.debug(f"正在为任务 {task_id} 提交签到，坐标 [{lng:.6f}, {lat:.6f}]")
 

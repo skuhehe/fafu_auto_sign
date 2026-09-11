@@ -24,8 +24,11 @@ class TestAppConfig:
         assert config.user_token == "2_TEST_TOKEN_HERE"
         assert config.jitter == 0.00005  # Default
         assert config.image_path == "dorm.jpg"  # Default
+        assert config.image_upload_enabled is False  # Default
         assert config.base_url == "http://stuhtapi.fafu.edu.cn"  # Default
         assert config.heartbeat_interval == 900  # Default
+        assert config.sign_delay_min == 900  # Default
+        assert config.sign_delay_max == 2700  # Default
         assert config.log_level == "INFO"  # Default
 
     def test_token_not_starting_with_2_(self):
@@ -46,15 +49,29 @@ class TestAppConfig:
             user_token="2_CUSTOM_TOKEN",
             jitter=0.0001,
             image_path="custom.jpg",
+            image_upload_enabled=True,
             base_url="http://test.example.com",
             heartbeat_interval=600,
+            sign_delay_min=120,
+            sign_delay_max=360,
             log_level="DEBUG",
         )
         assert config.jitter == 0.0001
         assert config.image_path == "custom.jpg"
+        assert config.image_upload_enabled is True
         assert config.base_url == "http://test.example.com"
         assert config.heartbeat_interval == 600
+        assert config.sign_delay_min == 120
+        assert config.sign_delay_max == 360
         assert config.log_level == "DEBUG"
+
+    def test_sign_delay_range_validation(self):
+        """测试签到延迟范围验证。"""
+        with pytest.raises(ValidationError, match="签到延迟最小值不能大于最大值"):
+            AppConfig(user_token="2_TEST_TOKEN", sign_delay_min=360, sign_delay_max=120)
+
+        with pytest.raises(ValidationError, match="签到延迟不能为负数"):
+            AppConfig(user_token="2_TEST_TOKEN", sign_delay_min=-1)
 
     def test_invalid_log_level(self):
         """Test invalid log level 开头的令牌被拒绝。"""
@@ -109,12 +126,18 @@ class TestLoadConfig:
         monkeypatch.setenv("FAFU_USER_TOKEN", "2_ENV_TOKEN")
         monkeypatch.setenv("FAFU_JITTER", "0.0001")
         monkeypatch.setenv("FAFU_IMAGE_PATH", "env.jpg")
+        monkeypatch.setenv("FAFU_IMAGE_UPLOAD_ENABLED", "true")
+        monkeypatch.setenv("FAFU_SIGN_DELAY_MIN", "120")
+        monkeypatch.setenv("FAFU_SIGN_DELAY_MAX", "360")
 
         config = load_config()
 
         assert config.user_token == "2_ENV_TOKEN"
         assert config.jitter == 0.0001
         assert config.image_path == "env.jpg"
+        assert config.image_upload_enabled is True
+        assert config.sign_delay_min == 120
+        assert config.sign_delay_max == 360
 
     def test_env_vars_override_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """测试环境变量覆盖JSON文件值。"""

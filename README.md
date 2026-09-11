@@ -16,7 +16,7 @@
 
 ✅ **防封控策略 (Anti-Ban)**：提交签到时自动为经纬度添加安全范围内的随机偏移量（Float微调），模拟真实人类定位的 GPS 漂移现象。
 
-✅ **自动图片上传**：支持自动读取配置的图片文件，对接七牛云接口实现静默上传与签到绑定。
+✅ **可选自动图片上传**：开启配置后自动读取图片文件，对接七牛云接口实现上传与签到绑定，默认关闭。
 
 ✅ **多图片随机选择**：支持从指定目录随机选择图片上传，避免长期使用同一张照片被识别，支持 `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` 格式。
 
@@ -94,12 +94,15 @@ export FAFU_USER_TOKEN="2_YOUR_TOKEN_HERE"
 export FAFU_JITTER="0.00005"
 export FAFU_IMAGE_PATH="dorm.jpg"
 export FAFU_BASE_URL="http://stuhtapi.fafu.edu.cn"
+export FAFU_IMAGE_UPLOAD_ENABLED="false"  # 是否上传签到图片
 export FAFU_HEARTBEAT_INTERVAL="900"
 export FAFU_NOTIFICATION_ENABLED="false"
 export FAFU_SERVERCHAN_KEY=""
 export FAFU_IMAGE_DIR="./photos/"  # 图片目录路径（启用随机选择）
 export FAFU_TASK_KEYWORDS='["晚归"]'  # 任务关键词列表（JSON格式）
 export FAFU_LATEST_IMAGE_DIR=""  # 最新图片目录路径
+export FAFU_SIGN_DELAY_MIN="900"  # 签到前最小随机等待时间（秒）
+export FAFU_SIGN_DELAY_MAX="2700"  # 签到前最大随机等待时间（秒）
 ```
 
 **Windows PowerShell:**
@@ -115,8 +118,11 @@ $env:FAFU_USER_TOKEN="2_YOUR_TOKEN_HERE"
 | `jitter` | ❌ | `0.00005` | GPS 抖动量（0 到 0.001 之间） |
 | `image_path` | ❌ | `dorm.jpg` | 签到照片文件路径（当未配置 `image_dir` 或 `latest_image_dir` 时使用） |
 | `image_dir` | ❌ | - | 图片目录路径，设置后将从目录中随机选择图片上传（优先级高于 `image_path`） |
+| `image_upload_enabled` | ❌ | `false` | 是否上传签到图片；关闭时不上传且不提交 `signImg` |
 | `base_url` | ❌ | `http://stuhtapi.fafu.edu.cn` | API 基础 URL |
 | `heartbeat_interval` | ❌ | `900` | 心跳间隔秒数（默认 15 分钟） |
+| `sign_delay_min` | ❌ | `900` | 签到前随机等待的最小秒数 |
+| `sign_delay_max` | ❌ | `2700` | 签到前随机等待的最大秒数 |
 | `log_level` | ❌ | `INFO` | 日志级别（DEBUG/INFO/WARNING/ERROR/CRITICAL） |
 | `notification_enabled` | ❌ | `false` | 是否启用微信推送通知 |
 | `serverchan_key` | ❌ | - | Server酱 SendKey（启用通知时必需）|
@@ -130,13 +136,16 @@ $env:FAFU_USER_TOKEN="2_YOUR_TOKEN_HERE"
 {
   "user_token": "2_YOUR_TOKEN_HERE",
   "jitter": 0.00005,
-  "image_dir": "./photos/",  // 设置为图片目录路径
-  "image_path": "dorm.jpg",   // 备用单图片（可选）
+  "image_dir": "./photos/",
+  "image_path": "dorm.jpg",
+  "image_upload_enabled": false,
   "base_url": "http://stuhtapi.fafu.edu.cn",
   "heartbeat_interval": 900,
+  "sign_delay_min": 900,
+  "sign_delay_max": 2700,
   "log_level": "INFO",
-  "task_keywords": ["晚归", "查寝"],  // 自定义任务关键词
-  "latest_image_dir": "./camera/"     // 最新图片目录（可选）
+  "task_keywords": ["晚归", "查寝"],
+  "latest_image_dir": "./camera/"
 }
 ```
 
@@ -147,10 +156,17 @@ $env:FAFU_USER_TOKEN="2_YOUR_TOKEN_HERE"
 2. `image_dir` - 从目录中随机选择图片
 3. `image_path` - 使用指定的单张图片
 
+图片上传默认关闭。将 `image_upload_enabled` 设置为 `true` 后，程序才会上传图片并将返回的 URL 放入签到请求的 `signImg` 字段。
+
 **任务关键词说明**：
 - 默认只识别包含"晚归"的签到任务
 - 可自定义多个关键词，如 `["晚归", "查寝", "点名"]`
 - 只要任务名称包含任意一个关键词，就会被识别为待签到任务
+
+**签到前随机延迟说明**：
+- 默认每个匹配任务在获取任务详情后随机等待 15–45 分钟，再上传图片并提交签到。
+- 等待期间收到 Ctrl+C 或 SIGTERM 时会立即退出。
+- 将 `sign_delay_min` 和 `sign_delay_max` 都设为 `0` 可关闭延迟。
 
 #### 微信推送通知配置（可选）
 
@@ -190,8 +206,13 @@ $env:FAFU_USER_TOKEN="2_YOUR_TOKEN_HERE"
 # 使用默认配置文件 (config.json)
 python -m fafu_auto_sign
 
+# 只扫描一次并最多处理一个匹配任务，然后退出（跳过签到前延迟）
+python -m fafu_auto_sign --once
+
 # 指定配置文件路径
 python -m fafu_auto_sign --config /path/to/config.json
+# 指定配置文件并单次运行
+python -m fafu_auto_sign --once --config /path/to/config.json
 # 或简写
 python -m fafu_auto_sign -c /path/to/config.json
 
@@ -201,6 +222,8 @@ python -m fafu_auto_sign
 # 使用控制台脚本（安装后）
 fafu-auto-sign
 ```
+
+`--once` 模式只执行一次任务扫描，最多处理第一个匹配任务，然后退出，并跳过 `sign_delay_min` 和 `sign_delay_max` 配置的延迟。
 
 💡 **建议**：由于本程序自带"心跳保活"机制（默认每 15 分钟运行一次），建议将其部署在 24 小时开机的云服务器、树莓派或软路由上。在 Linux 下可使用 `nohup` 命令使其在后台持续运行：
 
