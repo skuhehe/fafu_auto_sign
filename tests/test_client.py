@@ -306,7 +306,7 @@ class TestSpecialStatusCodes:
 
                         # Verify error message was logged
                         mock_error.assert_called_once_with(
-                            "Token 已过期，请重新抓包获取并更新配置文件！"
+                            "[x] Token已过期，请重新抓包获取并更新配置文件！"
                         )
                         # Verify sys.exit was called with code 1
                         mock_exit.assert_called_once_with(1)
@@ -324,7 +324,7 @@ class TestSpecialStatusCodes:
 
                         # Verify error message was logged
                         mock_error.assert_called_once_with(
-                            "运行脚本的系统时间与标准北京时间不一致，签名校验失败，请校准系统时间！"
+                            "[x] 运行脚本的系统时间与标准北京时间不一致，签名校验失败，请校准系统时间！"
                         )
                         # Verify sys.exit was called with code 1
                         mock_exit.assert_called_once_with(1)

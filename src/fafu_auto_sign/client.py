@@ -109,7 +109,7 @@ class FAFUClient:
                     sys.exit(1)
 
                 if response.status_code == 408:
-                    self.logger.error("[x] 系统时间不同步，请校准系统时间！")
+                    self.logger.error("[x] 运行脚本的系统时间与标准北京时间不一致，签名校验失败，请校准系统时间！")
                     # 发送通知（如果启用）
                     if getattr(self.config, "notification_enabled", False):
                         from fafu_auto_sign.services.notification_service import NotificationService
