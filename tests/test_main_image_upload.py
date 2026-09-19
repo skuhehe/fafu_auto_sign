@@ -50,20 +50,21 @@ def _run_with_mocked_services(tmp_path, image_upload_enabled: bool):
         patch("fafu_auto_sign.main.FAFUClient") as client_class,
         patch("fafu_auto_sign.main.GracefulShutdown", return_value=mock_shutdown),
         patch("fafu_auto_sign.main.TaskService", return_value=mock_task_service),
-        patch("fafu_auto_sign.main.UploadService", return_value=mock_upload_service),
+        patch("fafu_auto_sign.main.UploadService", return_value=mock_upload_service) as upload_class,
         patch("fafu_auto_sign.main.SignService", return_value=mock_sign_service),
         patch("fafu_auto_sign.main.setup_logging"),
     ):
         client_class.return_value.__enter__.return_value = mock_client
         client_class.return_value.__exit__.return_value = False
-        run(str(config_path))
+        # 状态文件走 tmp_path，避免污染项目根目录的真实 state.json
+        run(str(config_path), state_path=str(tmp_path / "state.json"))
 
-    return mock_upload_service, mock_sign_service
+    return mock_upload_service, mock_sign_service, upload_class
 
 
 def test_image_upload_is_skipped_by_default(tmp_path):
     """默认关闭时不应调用上传服务，也不应提交图片 URL。"""
-    upload_service, sign_service = _run_with_mocked_services(tmp_path, False)
+    upload_service, sign_service, _ = _run_with_mocked_services(tmp_path, False)
 
     upload_service.upload_image.assert_not_called()
     assert sign_service.submit_sign.call_args.kwargs["image_url"] is None
@@ -71,9 +72,23 @@ def test_image_upload_is_skipped_by_default(tmp_path):
 
 def test_image_upload_can_be_enabled(tmp_path):
     """开启开关后应上传图片并把返回 URL 传给签到服务。"""
-    upload_service, sign_service = _run_with_mocked_services(tmp_path, True)
+    upload_service, sign_service, _ = _run_with_mocked_services(tmp_path, True)
 
     upload_service.upload_image.assert_called_once_with("dorm.jpg")
     assert sign_service.submit_sign.call_args.kwargs["image_url"] == (
         "https://example.com/image.jpg"
     )
+
+
+def test_upload_service_is_not_constructed_when_disabled(tmp_path):
+    """关闭图片上传时不应构造 UploadService（省掉无用的初始化开销）。"""
+    _, _, upload_class = _run_with_mocked_services(tmp_path, False)
+
+    upload_class.assert_not_called()
+
+
+def test_upload_service_is_constructed_when_enabled(tmp_path):
+    """开启图片上传时才构造 UploadService。"""
+    _, _, upload_class = _run_with_mocked_services(tmp_path, True)
+
+    upload_class.assert_called_once()

@@ -6,7 +6,7 @@ import sys
 from fafu_auto_sign.main import run
 
 
-def main():
+def main() -> None:
     """主入口点，包含命令行参数解析。"""
     parser = argparse.ArgumentParser(description="FAFU自动签到助手")
     parser.add_argument(
@@ -17,10 +17,25 @@ def main():
         action="store_true",
         help="只扫描一次并最多处理一个匹配任务，然后退出（跳过签到前延迟）",
     )
+    parser.add_argument(
+        "--state",
+        default=None,
+        help="运行期状态文件路径（默认: 取配置项 state_path，即 state.json）",
+    )
+    parser.add_argument(
+        "--ignore-backoff",
+        action="store_true",
+        help="忽略持久化的失败退避并立即尝试（排查问题时使用）",
+    )
     args = parser.parse_args()
 
     try:
-        run(args.config, once=args.once)
+        run(
+            args.config,
+            once=args.once,
+            state_path=args.state,
+            ignore_backoff=args.ignore_backoff,
+        )
     except KeyboardInterrupt:
         print("\n程序被用户中断")
         sys.exit(0)

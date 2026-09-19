@@ -38,7 +38,8 @@ def test_once_mode_exits_after_one_scan_without_waiting(tmp_path):
         client_class.return_value.__enter__.return_value = mock_client
         client_class.return_value.__exit__.return_value = False
 
-        run(str(config_path), once=True)
+        # 状态文件走 tmp_path，避免污染项目根目录的真实 state.json
+        run(str(config_path), once=True, state_path=str(tmp_path / "state.json"))
 
     mock_task_service.get_pending_tasks.assert_called_once_with()
     mock_shutdown.wait.assert_not_called()
@@ -86,7 +87,7 @@ def test_once_mode_skips_delay_and_processes_only_first_task(tmp_path):
         client_class.return_value.__enter__.return_value = mock_client
         client_class.return_value.__exit__.return_value = False
 
-        run(str(config_path), once=True)
+        run(str(config_path), once=True, state_path=str(tmp_path / "state.json"))
 
     wait_delay.assert_not_called()
     mock_task_service.get_task_details.assert_called_once_with(123)

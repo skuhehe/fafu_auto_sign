@@ -23,8 +23,12 @@ def _build_config(tmp_path, heartbeat_interval: int):
     return str(config_path)
 
 
-def _run_two_rounds(config_path: str, waits: list):
-    """运行守护进程并把 shutdown.wait 的调用参数记录到 waits。"""
+def _run_two_rounds(config_path: str, waits: list, state_path: str):
+    """运行守护进程并把 shutdown.wait 的调用参数记录到 waits。
+
+    状态文件显式指向 tmp_path，避免读写项目根目录的真实 ``state.json``——
+    否则用例结果会依赖本机运行数据（例如残留的退避时间）。
+    """
     mock_shutdown = MagicMock()
     mock_shutdown.is_stopped.return_value = False
     # 心跳等待返回 True，让主循环在处理一轮后退出
@@ -43,13 +47,15 @@ def _run_two_rounds(config_path: str, waits: list):
     ):
         client_class.return_value.__enter__.return_value = MagicMock()
         client_class.return_value.__exit__.return_value = False
-        run(config_path, once=False)
+        run(config_path, once=False, state_path=state_path)
 
 
 def test_heartbeat_interval_config_is_used(tmp_path):
     """常驻模式应使用配置的心跳间隔，而不是硬编码的 900 秒。"""
     waits: list = []
-    _run_two_rounds(_build_config(tmp_path, 123), waits)
+    _run_two_rounds(
+        _build_config(tmp_path, 123), waits, str(tmp_path / "state.json")
+    )
 
     assert waits == [123]
 
@@ -60,6 +66,6 @@ def test_heartbeat_interval_default_is_900(tmp_path):
     config_path.write_text(json.dumps({"user_token": "2_test_token"}), encoding="utf-8")
 
     waits: list = []
-    _run_two_rounds(str(config_path), waits)
+    _run_two_rounds(str(config_path), waits, str(tmp_path / "state.json"))
 
     assert waits == [900]
