@@ -5,12 +5,12 @@
 """
 
 import logging
-import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from fafu_auto_sign.client import FAFUClient
 from fafu_auto_sign.config import AppConfig
+from fafu_auto_sign.timeutil import now_ms
 
 
 @dataclass
@@ -102,8 +102,8 @@ class TaskService:
 
             self.logger.debug(f"从 API 获取了 {len(records)} 个任务")
 
-            # 获取当前时间的毫秒数（Unix 时间戳）
-            current_time_ms = int(time.time() * 1000)
+            # 获取当前时间的毫秒数（Unix 时间戳，与时区无关）
+            current_time_ms = now_ms()
 
             # 收集所有匹配的任务
             matching_task_ids: list[str] = []
@@ -124,12 +124,22 @@ class TaskService:
                 # 检查任务名称是否包含任一配置中的关键词
                 is_target_type = any(keyword in task_name for keyword in self.config.task_keywords)
 
+                # 检查该任务本人是否已经签过到
+                sign_state = self._extract_sign_state(task)
+                already_signed = sign_state is not None and sign_state != 0
+
                 self.logger.debug(
                     f"任务: {task_name} (ID: {task_id}), "
-                    f"活跃: {is_active}, 目标: {is_target_type}"
+                    f"活跃: {is_active}, 目标: {is_target_type}, 签到状态: {sign_state}"
                 )
 
-                if is_active and is_target_type:
+                if is_active and is_target_type and already_signed:
+                    # 已签到：跳过，避免重复提交（重复提交既无意义也可能触发风控）
+                    self.logger.info(
+                        f"[=] 任务已在有效时间内且本人已签到: 【{task_name}】 "
+                        f"(ID: {task_id}, signState={sign_state})，跳过"
+                    )
+                elif is_active and is_target_type:
                     # 找到匹配的任务
                     self.logger.info(
                         f"[*] 精准匹配到进行中的签到任务: 【{task_name}】 (ID: {task_id})"
@@ -149,6 +159,31 @@ class TaskService:
             # 记录错误并重新抛出供调用方处理
             self.logger.error(f"[!] 获取任务列表时发生异常: {e}")
             raise
+
+    @staticmethod
+    def _extract_sign_state(task: dict[str, Any]) -> Optional[int]:
+        """从任务记录中提取本人的签到状态。
+
+        服务端在任务列表里通过 ``signInStudent.signState`` 表示签到状态
+        （``0`` 表示未签到，非 0 表示已签到）。字段缺失时返回 None，
+        调用方按「未知」处理并保守地继续尝试签到。
+
+        参数:
+            task: 任务列表中的单条记录。
+
+        返回:
+            签到状态整数；字段缺失或格式异常时返回 None。
+        """
+        student = task.get("signInStudent")
+        if not isinstance(student, dict):
+            return None
+        raw = student.get("signState")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
 
     def get_pending_task(self) -> Optional[str]:
         """获取第一个匹配的待办任务 ID（向后兼容）。
