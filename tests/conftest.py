@@ -6,6 +6,36 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from fafu_auto_sign.client import FAFUClient
+
+
+@pytest.fixture(autouse=True)
+def _reset_request_throttle():
+    """每个测试前后重置客户端的节流计时器。
+
+    ``FAFUClient._last_request_at`` 是类属性（让同进程内的多个客户端共享同一
+    节流窗口），若不重置会跨测试互相影响，让用例执行顺序决定结果。
+
+    注意：这里**不**尝试去改 ``AppConfig`` 的字段默认值——Pydantic v2 的模型
+    字段并非类属性，``setattr(AppConfig, ...)`` 之后读取仍会走
+    ``__getattr__`` 拿到字段定义，等于没改。需要关闭节流的用例请直接设置
+    客户端实例的 ``min_request_interval``（实例属性优先）。
+    """
+    FAFUClient._last_request_at = 0.0
+    yield
+    FAFUClient._last_request_at = 0.0
+
+
+@pytest.fixture
+def throttled_config():
+    """开启请求节流的配置，供节流相关用例使用。
+
+    实例属性优先于配置默认值，因此显式构造的间隔不受其他用例影响。
+    """
+    from fafu_auto_sign.config import AppConfig
+
+    return AppConfig(user_token="2_TEST_TOKEN", min_request_interval=2.0)
+
 
 @pytest.fixture
 def sample_token():

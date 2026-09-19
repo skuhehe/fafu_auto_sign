@@ -1,6 +1,7 @@
 """Tests for HTTP client module."""
 
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import pytest
 import requests
 
-from fafu_auto_sign.client import FAFUClient
+from fafu_auto_sign.client import FAFUClient, response_contains_field
 from fafu_auto_sign.config import AppConfig
 
 
@@ -25,8 +26,14 @@ def mock_config():
 
 @pytest.fixture
 def client(mock_config):
-    """Create a FAFUClient instance for testing."""
-    return FAFUClient(mock_config)
+    """Create a FAFUClient instance for testing.
+
+    默认关闭请求节流：真实的 2 秒间隔会让套件慢到不可用。
+    节流本身由 ``TestRequestThrottle`` 用显式间隔的独立实例验证。
+    """
+    instance = FAFUClient(mock_config)
+    instance.min_request_interval = 0.0
+    return instance
 
 
 class TestFAFUClientInitialization:
@@ -156,7 +163,7 @@ class TestRetryLogic:
     """Test application-level retry mechanism."""
 
     def test_retry_on_429_status(self, client):
-        """Test that 429 status triggers retry."""
+        """Test that 429 status triggers retry with the rate-limit backoff."""
         mock_response_429 = Mock()
         mock_response_429.status_code = 429
 
@@ -175,8 +182,8 @@ class TestRetryLogic:
 
                     assert response == mock_response_200
                     assert mock_request.call_count == 2
-                    # Should have slept with exponential backoff (1 second)
-                    mock_sleep.assert_called_once_with(1)
+                    # 429 使用更长的阶梯退避（首档 30 秒），而非 1→2→4 秒
+                    mock_sleep.assert_called_once_with(FAFUClient.RATE_LIMIT_BACKOFF[0])
 
     def test_retry_on_500_status(self, client):
         """Test that 500 status triggers retry."""
@@ -398,3 +405,104 @@ class TestHeaderOverride:
                 assert headers["Authorization"] == "generated_auth"
                 # Custom header should override generated one
                 assert headers["User-Agent"] == "custom_agent"
+
+
+class TestRequestThrottle:
+    """Test the inter-request throttle (WAF rate-limit protection)."""
+
+    def test_throttle_waits_for_remaining_interval(self):
+        """两次请求之间的间隔不足时应补齐等待。"""
+        config = AppConfig(user_token="2_TEST_TOKEN", min_request_interval=2.0)
+        client = FAFUClient(config)
+
+        # 制造「上一次请求刚刚发生」的状态
+        FAFUClient._last_request_at = time.time()
+
+        with patch("fafu_auto_sign.client.time.sleep") as mock_sleep:
+            client._throttle()
+
+        assert mock_sleep.call_count == 1
+        waited = mock_sleep.call_args[0][0]
+        assert 0 < waited <= 2.0
+
+    def test_throttle_skips_when_interval_elapsed(self):
+        """间隔已足够时不应等待。"""
+        config = AppConfig(user_token="2_TEST_TOKEN", min_request_interval=2.0)
+        client = FAFUClient(config)
+
+        FAFUClient._last_request_at = time.time() - 10
+
+        with patch("fafu_auto_sign.client.time.sleep") as mock_sleep:
+            client._throttle()
+
+        mock_sleep.assert_not_called()
+
+    def test_throttle_disabled_when_interval_zero(self):
+        """间隔为 0 表示关闭节流。"""
+        config = AppConfig(user_token="2_TEST_TOKEN", min_request_interval=0)
+        client = FAFUClient(config)
+
+        FAFUClient._last_request_at = time.time()
+
+        with patch("fafu_auto_sign.client.time.sleep") as mock_sleep:
+            client._throttle()
+
+        mock_sleep.assert_not_called()
+
+    def test_throttle_applies_to_every_retry_attempt(self, client):
+        """重试的每一次尝试都要经过节流。"""
+        mock_response_503 = Mock()
+        mock_response_503.status_code = 503
+
+        mock_response_200 = Mock()
+        mock_response_200.status_code = 200
+        mock_response_200.raise_for_status.return_value = None
+
+        with patch.object(
+            client.session,
+            "request",
+            side_effect=[mock_response_503, mock_response_200],
+        ):
+            with patch("fafu_auto_sign.client.generate_headers", return_value={}):
+                with patch.object(client, "_throttle") as mock_throttle:
+                    with patch("time.sleep"):
+                        client.request("GET", "/test")
+
+        # 2 次外发尝试 → 2 次节流
+        assert mock_throttle.call_count == 2
+
+
+class TestResponseContainsField:
+    """Test the response-body success detection helper."""
+
+    def test_detects_field_in_json_object(self):
+        """JSON 对象中存在该字段时返回 True。"""
+        response = Mock()
+        response.json.return_value = {"timestamp": 123, "msg": "ok"}
+
+        assert response_contains_field(response, "timestamp") is True
+
+    def test_returns_false_when_field_absent(self):
+        """JSON 对象中缺少该字段时返回 False。"""
+        response = Mock()
+        response.json.return_value = {"errorCode": "41567"}
+
+        assert response_contains_field(response, "timestamp") is False
+
+    def test_falls_back_to_substring_for_non_json(self):
+        """非 JSON 响应（如 WAF 的 HTML）回退子串匹配。"""
+        response = Mock()
+        response.json.side_effect = ValueError("not json")
+        response.text = "<html>blocked</html>"
+
+        assert response_contains_field(response, "timestamp") is False
+
+    def test_substring_match_avoided_for_json(self):
+        """JSON 解析成功时不使用子串匹配（避免被空格/换行击穿）。"""
+        response = Mock()
+        # 字段名出现在某个字符串值里，但不是顶层键
+        response.json.return_value = {"note": 'contains "timestamp" inside a value'}
+        response.text = '{"note": "contains \\"timestamp\\" inside a value"}'
+
+        assert response_contains_field(response, "timestamp") is False
+

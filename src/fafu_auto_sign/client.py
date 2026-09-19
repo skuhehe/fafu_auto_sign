@@ -17,11 +17,42 @@ from fafu_auto_sign.config import AppConfig
 from fafu_auto_sign.crypto import generate_headers
 
 
+def response_contains_field(response: Response, field: str) -> bool:
+    """判断响应体中是否存在指定字段。
+
+    优先按 JSON 解析，从而避免 ``'"records"'`` 这类子串匹配被空格、换行等
+    格式差异击穿；响应体不是 JSON 时（例如 WAF 返回的 HTML 拦截页）回退为
+    子串匹配，保持对异常响应的宽容。
+
+    参数:
+        response: ``requests`` 的响应对象。
+        field: 要检查的字段名。
+
+    返回:
+        存在该字段返回 True，否则返回 False。
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    except Exception:  # pragma: no cover - 防御性兜底（编码/解析库异常）
+        payload = None
+
+    if isinstance(payload, dict):
+        return field in payload
+
+    try:
+        return f'"{field}"' in response.text
+    except Exception:  # pragma: no cover - 响应体不可读时按失败处理
+        return False
+
+
 class FAFUClient:
     """支持重试逻辑和会话管理的 HTTP 客户端。
 
     特性:
-    - 应用级别的指数退避重试
+    - 请求节流：同一会话两次请求之间保持最小间隔，规避服务端 WAF 限流
+    - 应用级别的指数退避重试（429 使用更长的退避阶梯）
     - 每次重试时动态生成授权头
     - 特殊处理 401（令牌过期）和 408（时间同步错误）
     - 支持上下文管理器
@@ -33,8 +64,17 @@ class FAFUClient:
     RETRY_DELAY_BASE = 1  # 基础延迟秒数（1, 2, 4...）
     RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
+    #: 收到 429（服务端限流）时的退避阶梯（秒）。
+    #: 真实 WAF 限流窗口通常在几十秒到十几分钟量级，1→2→4 秒的退避不足以脱离限流，
+    #: 反而会持续加压；这里改用阶梯退避。
+    RATE_LIMIT_BACKOFF = (30, 60, 120)
+
     # 超时配置（连接，读取）
     TIMEOUT = (10, 30)
+
+    #: 上次请求完成时刻。放在类属性上，使多个实例共享同一节流窗口
+    #: （同一进程内同时使用多个客户端时也能保证对服务端的整体节奏）。
+    _last_request_at: float = 0.0
 
     def __init__(self, config: AppConfig):
         """初始化 HTTP 客户端。
@@ -45,6 +85,21 @@ class FAFUClient:
         self.config = config
         self.session = requests.Session()
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.min_request_interval = float(getattr(config, "min_request_interval", 0.0) or 0.0)
+
+    def _throttle(self) -> None:
+        """在两次外发请求之间保持最小间隔。
+
+        服务端存在 WAF，短时间内的连续请求会触发限流；限流窗口可能正好覆盖
+        签到时段，导致漏签。因此所有请求（含重试）都经过这里统一节流。
+        """
+        interval = self.min_request_interval
+        if interval <= 0:
+            return
+        elapsed = time.time() - FAFUClient._last_request_at
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
+        FAFUClient._last_request_at = time.time()
 
     def request(self, method: str, url: str, **kwargs: Any) -> Response:
         """发起带重试逻辑的 HTTP 请求。
@@ -91,6 +146,7 @@ class FAFUClient:
 
             try:
                 self.logger.debug(f"请求 {attempt + 1}/{self.MAX_RETRIES}: {method} {full_url}")
+                self._throttle()
                 response = self.session.request(method, full_url, headers=headers, **kwargs)
 
                 # 处理会终止程序的特殊状态码
@@ -125,11 +181,20 @@ class FAFUClient:
                 # 根据状态码检查是否应该重试
                 if response.status_code in self.RETRY_STATUS_CODES:
                     if attempt < self.MAX_RETRIES - 1:
-                        delay = self.RETRY_DELAY_BASE * (2**attempt)
-                        self.logger.warning(
-                            f"收到状态码 {response.status_code}, "
-                            f"{delay}秒后重试... (尝试 {attempt + 1}/{self.MAX_RETRIES})"
-                        )
+                        if response.status_code == 429:
+                            delay = self.RATE_LIMIT_BACKOFF[
+                                min(attempt, len(self.RATE_LIMIT_BACKOFF) - 1)
+                            ]
+                            self.logger.warning(
+                                f"被服务端限流(429)，{delay}秒后重试... "
+                                f"(尝试 {attempt + 1}/{self.MAX_RETRIES})"
+                            )
+                        else:
+                            delay = self.RETRY_DELAY_BASE * (2**attempt)
+                            self.logger.warning(
+                                f"收到状态码 {response.status_code}, "
+                                f"{delay}秒后重试... (尝试 {attempt + 1}/{self.MAX_RETRIES})"
+                            )
                         time.sleep(delay)
                         continue
 

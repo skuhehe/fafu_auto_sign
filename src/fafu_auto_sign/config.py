@@ -42,6 +42,22 @@ class AppConfig(BaseSettings):
     heartbeat_interval: int = Field(default=900, description="心跳间隔（秒）")
     sign_delay_min: int = Field(default=900, description="签到前最小随机等待时间（秒）")
     sign_delay_max: int = Field(default=2700, description="签到前最大随机等待时间（秒）")
+    min_request_interval: float = Field(
+        default=2.0, description="同一会话两次请求之间的最小间隔（秒），用于规避 WAF 限流"
+    )
+    timezone_offset: int = Field(
+        default=8, description="业务时区相对 UTC 的小时偏移（FAFU 服务端按北京时间 UTC+8 判定）"
+    )
+    state_path: str = Field(
+        default="state.json", description="运行期状态文件路径（持久化失败退避，跨进程共享）"
+    )
+    sign_success_field: str = Field(
+        default="timestamp",
+        description=(
+            "判定签到成功的响应体字段名。该判据来自跨项目逆向记录，"
+            "未在本项目用真实响应验证，服务端结构不同时需调整"
+        ),
+    )
     log_level: str = Field(default="INFO", description="日志级别")
     # 通知配置
     notification_enabled: bool = Field(default=False, description="启用通知")
@@ -144,6 +160,40 @@ class AppConfig(BaseSettings):
             raise ValueError("签到延迟最小值不能大于最大值")
         return self
 
+    @field_validator("min_request_interval")
+    @classmethod
+    def validate_min_request_interval(cls, v: float) -> float:
+        """验证请求间隔非负且不过大（超过 60 秒会显著拖慢多任务处理）。"""
+        if v < 0:
+            raise ValueError(f"请求最小间隔不能为负数，当前值: {v}")
+        if v > 60:
+            raise ValueError(f"请求最小间隔不应超过 60 秒，当前值: {v}")
+        return v
+
+    @field_validator("timezone_offset")
+    @classmethod
+    def validate_timezone_offset(cls, v: int) -> int:
+        """验证时区偏移在合法范围内。"""
+        if not -12 <= v <= 14:
+            raise ValueError(f"时区偏移必须在 -12 到 14 小时之间，当前值: {v}")
+        return v
+
+    @field_validator("state_path")
+    @classmethod
+    def validate_state_path(cls, v: str) -> str:
+        """验证状态文件路径非空。"""
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"状态文件路径不能为空，当前值: {v!r}")
+        return v
+
+    @field_validator("sign_success_field")
+    @classmethod
+    def validate_sign_success_field(cls, v: str) -> str:
+        """验证成功判定字段名非空。"""
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"签到成功判定字段名不能为空，当前值: {v!r}")
+        return v
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:
@@ -226,6 +276,16 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     sign_delay_max_env = os.environ.get("FAFU_SIGN_DELAY_MAX")
     if sign_delay_max_env:
         config_dict["sign_delay_max"] = int(sign_delay_max_env)
+    min_request_interval_env = os.environ.get("FAFU_MIN_REQUEST_INTERVAL")
+    if min_request_interval_env:
+        config_dict["min_request_interval"] = float(min_request_interval_env)
+    timezone_offset_env = os.environ.get("FAFU_TIMEZONE_OFFSET")
+    if timezone_offset_env:
+        config_dict["timezone_offset"] = int(timezone_offset_env)
+    if os.environ.get("FAFU_STATE_PATH"):
+        config_dict["state_path"] = os.environ.get("FAFU_STATE_PATH")
+    if os.environ.get("FAFU_SIGN_SUCCESS_FIELD"):
+        config_dict["sign_success_field"] = os.environ.get("FAFU_SIGN_SUCCESS_FIELD")
     if os.environ.get("FAFU_LOG_LEVEL"):
         config_dict["log_level"] = os.environ.get("FAFU_LOG_LEVEL")
     notification_enabled_env = os.environ.get("FAFU_NOTIFICATION_ENABLED")
@@ -277,6 +337,10 @@ def create_example_config(path: str | Path = "config.json.example") -> None:
         "heartbeat_interval": 900,
         "sign_delay_min": 900,
         "sign_delay_max": 2700,
+        "min_request_interval": 2.0,
+        "timezone_offset": 8,
+        "state_path": "state.json",
+        "sign_success_field": "timestamp",
         "log_level": "INFO",
         "notification_enabled": False,
         "serverchan_key": None,  # Server酱 SendKey（以 SCT 开头）

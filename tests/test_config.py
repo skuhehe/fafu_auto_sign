@@ -286,3 +286,70 @@ class TestLoadConfigNewFeatures:
         config = load_config()
 
         assert config.latest_image_dir == str(test_dir)
+
+
+class TestStatePathConfig:
+    """运行期状态文件路径可配置（T-A5）。"""
+
+    def test_default_state_path(self):
+        """默认值为 state.json。"""
+        config = AppConfig(user_token="2_TEST_TOKEN")
+
+        assert config.state_path == "state.json"
+
+    def test_state_path_from_env(self, monkeypatch: pytest.MonkeyPatch):
+        """FAFU_STATE_PATH 可覆盖状态文件路径。"""
+        monkeypatch.setenv("FAFU_USER_TOKEN", "2_ENV_TOKEN")
+        monkeypatch.setenv("FAFU_STATE_PATH", "/var/lib/fafu/state.json")
+
+        config = load_config()
+
+        assert config.state_path == "/var/lib/fafu/state.json"
+
+    def test_state_path_env_overrides_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """环境变量优先级高于 JSON 配置。"""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps({"user_token": "2_JSON_TOKEN", "state_path": "from_json.json"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("FAFU_STATE_PATH", "from_env.json")
+
+        config = load_config(config_file)
+
+        assert config.state_path == "from_env.json"
+
+    def test_empty_state_path_is_rejected(self):
+        """空路径会导致状态无处落盘，必须在配置阶段拦下。"""
+        with pytest.raises(ValidationError) as exc_info:
+            AppConfig(user_token="2_TEST_TOKEN", state_path="   ")
+
+        assert "状态文件路径不能为空" in str(exc_info.value)
+
+
+class TestSignSuccessFieldConfig:
+    """签到成功判定字段可配置（T-A6）。"""
+
+    def test_default_success_field(self):
+        """默认字段为 timestamp（来自跨项目逆向记录）。"""
+        config = AppConfig(user_token="2_TEST_TOKEN")
+
+        assert config.sign_success_field == "timestamp"
+
+    def test_sign_success_field_from_env(self, monkeypatch: pytest.MonkeyPatch):
+        """FAFU_SIGN_SUCCESS_FIELD 可覆盖判定字段。"""
+        monkeypatch.setenv("FAFU_USER_TOKEN", "2_ENV_TOKEN")
+        monkeypatch.setenv("FAFU_SIGN_SUCCESS_FIELD", "resultCode")
+
+        config = load_config()
+
+        assert config.sign_success_field == "resultCode"
+
+    def test_empty_success_field_is_rejected(self):
+        """空字段名会让判定永远为假，必须在配置阶段拦下。"""
+        with pytest.raises(ValidationError) as exc_info:
+            AppConfig(user_token="2_TEST_TOKEN", sign_success_field="")
+
+        assert "签到成功判定字段名不能为空" in str(exc_info.value)
