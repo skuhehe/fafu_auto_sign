@@ -13,6 +13,8 @@ main.py
   ├─ logging_config.py
   ├─ client.py (FAFUClient)
   │   └─ crypto.py (generate_headers)
+  ├─ state.py (StateStore, BackoffState)   # 失败退避持久化
+  ├─ timeutil.py (now, now_ms, format_timestamp)  # 业务时区 UTC+8
   ├─ services/
   │   ├─ task_service.py (TaskService, TaskDetails)
   │   ├─ sign_service.py (SignService)
@@ -27,11 +29,13 @@ main.py
 
 | 类 | 文件 | 职责 |
 |----|------|------|
-| `AppConfig` | `config.py` | Pydantic配置，验证token格式(2_开头)、抖动范围(0-0.001) |
-| `FAFUClient` | `client.py` | HTTP客户端，指数退避重试，401/408直接exit |
-| `TaskService` | `services/task_service.py` | 获取任务列表，过滤"晚归"关键词，时间窗口判断 |
-| `SignService` | `services/sign_service.py` | GPS抖动提交签到，坐标格式化为6位小数 |
+| `AppConfig` | `config.py` | Pydantic配置，验证token格式(2_开头)、抖动范围(0-0.001)、请求间隔、时区偏移、状态文件路径、成功判定字段 |
+| `FAFUClient` | `client.py` | HTTP客户端，请求节流 + 指数退避重试（429 用 30/60/120 阶梯），401/408直接exit |
+| `TaskService` | `services/task_service.py` | 获取任务列表，过滤"晚归"关键词，时间窗口判断，按 `signState` 跳过已签 |
+| `SignService` | `services/sign_service.py` | GPS抖动提交签到，坐标格式化为6位小数，按响应体字段判定成功 |
 | `UploadService` | `services/upload_service.py` | 上传图片到七牛云，支持从目录随机选择，使用`with open()`确保关闭 |
+| `StateStore` | `state.py` | JSON 状态仓库：原子写(`os.replace`)、跨进程锁(`O_CREAT\|O_EXCL`)、增量合并、`chmod 600` |
+| `BackoffState` | `state.py` | 失败退避阶梯 `60/300/1800/7200` 秒，成功清零；持久化后跨进程共享 |
 | `GracefulShutdown` | `graceful_shutdown.py` | SIGINT/SIGTERM处理，15分钟wait或立即退出 |
 | `NotificationService` | `services/notification_service.py` | 微信推送通知，5分钟去重，非阻塞发送 |
 
@@ -48,18 +52,73 @@ generate_auth_header(url: str, user_token: str) -> str
 
 ### client.py
 ```python
-FAFUClient.request()  # 最大3次重试，延迟1,2,4秒
+FAFUClient.request()  # 最大3次重试
+# 429 -> RATE_LIMIT_BACKOFF = (30, 60, 120) 阶梯退避
+# 500/502/503/504 -> 指数退避 1, 2, 4 秒
 # 401 -> sys.exit(1) "Token过期"
 # 408 -> sys.exit(1) "时间不同步"
+
+FAFUClient._throttle()  # 每次请求（含重试）前保持 min_request_interval 秒间隔
+# _last_request_at 是类属性 -> 同进程多客户端共享节流窗口
+
+response_contains_field(response, field) -> bool
+# 优先 response.json() 判断 dict 是否含该字段；
+# 非 JSON（如 WAF 的 HTML 拦截页）时回退子串匹配 f'"{field}"' in response.text
+```
+
+### state.py
+```python
+StateStore(path="state.json")
+# load() -> dict          # 缺失/损坏/非 dict 一律返回 {}
+# get(key, default=None)
+# update(**values) -> dict  # None 表示删键；跨进程锁 + 增量合并 + 原子写
+
+BackoffState(store)
+# remaining_wait() -> float  # <=0 表示可以尝试
+# record_failure() -> float  # 失败计数+1（上限 4），返回本次退避秒数
+# record_success()           # 清零计数与退避
+# 键名：delay_failures / delay_next_attempt_at / delay_last_success_at / delay_last_failure_at
+```
+
+### timeutil.py
+```python
+CN_TZ_OFFSET = 8
+now(offset_hours=8) -> datetime   # 带时区信息的当前时间
+now_ms() -> int                   # Unix 毫秒时间戳（替代裸 time.time()）
+format_timestamp(ts, offset_hours=8) -> str  # "YYYY-MM-DD HH:MM:SS"，非法值返回其字符串
+local_timezone_offset() -> Optional[float]   # 宿主机时区偏移，取不到返回 None
 ```
 
 ### task_service.py
 ```python
-task_service.get_pending_task()  # 返回str(task_id)或None
+task_service.get_pending_tasks()  # 返回 list[str]，最多 10 个
 # 匹配条件：beginTime <= now <= endTime AND "晚归" in name
+# 且 signInStudent.signState 为 0 或缺失（非 0 视为已签到，跳过）
+
+task_service.get_pending_task()  # 向后兼容：返回第一个匹配 ID 或 None
+
+task_service._extract_sign_state(task) -> Optional[int]
+# 读 task["signInStudent"]["signState"]；缺失/非 dict/不可转 int 时返回 None
 
 task_service.get_task_details(task_id)  # 返回TaskDetails或None
 # 提取signInPositions[0]的坐标和位置名称
+```
+
+### sign_service.py
+```python
+DEFAULT_SUCCESS_FIELD = "timestamp"  # 配置项 sign_success_field 的默认值
+
+SignService(client, config)  # self.success_field 从 config.sign_success_field 读取
+# 非字符串/空值自动回退到 DEFAULT_SUCCESS_FIELD
+
+SignService.submit_sign(task_id, position_id, base_lng, base_lat, image_url=None) -> bool
+# 判定：2xx 且响应体含 success_field 才算成功（见 probe_sign_response）
+
+SignService.probe_sign_response(response) -> bool
+# submit_sign 内部复用它；状态码不可转 int 时返回 False 而非抛异常
+#
+# ⚠️ timestamp 这一判据来自跨项目逆向记录，未在本项目用真实响应验证；
+#    服务端结构不同时改配置，不要改回硬编码。
 ```
 
 ### upload_service.py
@@ -153,8 +212,11 @@ lat = base_lat + random.uniform(-jitter, jitter)
 |------|----------|------|
 | client.py | 重试后仍失败则抛出 | `raise RequestException` |
 | services | 捕获记录，返回None/False | `return None` |
-| main.py | 记录异常，继续下一次循环 | `except Exception: continue` |
+| main.py | 记录异常并置 `had_error=True`，本轮结束后推进退避，继续下一轮 | `had_error = True` |
 | 致命错误 | 立即exit | `sys.exit(1)` |
+
+> 注意：`main.py` 的失败退避只对**请求级失败**生效；「没有待办任务」是正常情况，
+> **不会**推进退避（否则安静时段会被锁进长退避而漏签）。
 
 ---
 
@@ -179,3 +241,8 @@ self.logger.error("[x] 错误: ...")    # 错误信息
 5. **添加通知功能**: 参考 `notification_service.py` 模式，使用局部导入避免循环依赖
 6. **修改通知配置**: 在 `config.py` 的 `AppConfig` 中添加字段，使用 `Field(default=False)`
 7. **集成通知到流程**: 在 `main.py` 初始化，在 `client.py` 致命错误前发送通知
+8. **修改成功判定字段**: 改配置项 `sign_success_field`（或 `FAFU_SIGN_SUCCESS_FIELD`），**不要**硬编码回代码
+9. **调整退避阶梯**: 改 `state.py` 的 `BACKOFF_SCHEDULE`；改 `client.py` 的 `RATE_LIMIT_BACKOFF`（仅 429）
+10. **改动时间判断**: 一律用 `fafu_auto_sign.timeutil`，不要引入裸 `time.time()`/`datetime.now()`
+11. **写涉及 `run()` 的测试**: 显式传 `state_path`（用 `tmp_path`），否则会读写项目根目录的真实 `state.json`
+12. **写涉及 `FAFUClient` 的测试**: 设 `client.min_request_interval = 0.0`，否则触发真实 sleep
