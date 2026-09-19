@@ -132,6 +132,11 @@ dorm.jpg
 
 config.json
 
+# 运行期状态（含退避计数与失败时间，属本地运行数据）
+state.json
+state.json.*
+*.lock
+
 
 # VS Code 个人配置
 .vscode/
