@@ -6,10 +6,18 @@
 
 import logging
 import random
-from typing import Optional
+from typing import Any, Optional
 
-from fafu_auto_sign.client import FAFUClient
+from fafu_auto_sign.client import FAFUClient, response_contains_field
 from fafu_auto_sign.config import AppConfig
+
+#: 默认的签到成功响应体标志字段。
+#: 服务端成功响应中带有该字段（见跨项目逆向记录：成功判定用「响应体含 timestamp」
+#: 而非仅看 HTTP 状态码）。失败/被风控拦截时响应体是错误信息或 WAF 的 HTML。
+#:
+#: ⚠️ 该判据来自跨项目逆向记录，**未在本项目用真实响应验证**。若服务端返回结构
+#: 不同，请调整配置项 ``sign_success_field`` / 环境变量 ``FAFU_SIGN_SUCCESS_FIELD``。
+DEFAULT_SUCCESS_FIELD = "timestamp"
 
 
 class SignService:
@@ -36,6 +44,14 @@ class SignService:
         self.client = client
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
+        # 成功判定字段可由配置覆盖；配置缺失或类型异常时回退到默认值，
+        # 保证判定不会因为一个坏配置项而退化成「永远成功」。
+        configured_field = getattr(config, "sign_success_field", DEFAULT_SUCCESS_FIELD)
+        self.success_field = (
+            configured_field
+            if isinstance(configured_field, str) and configured_field.strip()
+            else DEFAULT_SUCCESS_FIELD
+        )
 
     def submit_sign(
         self,
@@ -58,7 +74,13 @@ class SignService:
             image_url: 上传的签到图片 URL。为 None 或空字符串时不提交图片字段。
 
         返回:
-            如果签到成功（HTTP 200）返回 True，否则返回 False。
+            签到成功返回 True，否则返回 False。
+
+        判定依据:
+            **不能只看 HTTP 状态码**。服务端可能返回 200 但业务上失败
+            （被风控拦截、任务已过期等），此时只看状态码会把失败误报为成功。
+            因此以「状态码正常 **且** 响应体含成功标志字段」为准，
+            具体字段名由配置项 ``sign_success_field`` 决定。
         """
         # 使用抖动生成随机化的 GPS 坐标
         jitter = self.config.jitter
@@ -83,19 +105,42 @@ class SignService:
             # 使用查询参数发起 POST 请求
             response = self.client.post(url, params=params)
 
-            # 检查请求是否成功
-            if response.status_code == 200:
-                self.logger.info(f"✅ 签到成功！当前提交坐标：[{lng:.6f}, {lat:.6f}]")
-                return True
-            else:
-                self.logger.error(
-                    f"❌ 签到失败，状态码: {response.status_code}, 返回: {response.text}"
-                )
+            if not self.probe_sign_response(response):
+                # 失败原因分两类，日志要能区分，否则排查时无法判断是
+                # 「请求链路/风控问题」还是「业务上没签上」。
+                status = response.status_code
+                if not 200 <= status < 300:
+                    self.logger.error(f"❌ 签到失败，状态码: {status}, 返回: {response.text}")
+                else:
+                    self.logger.error(
+                        f"❌ 签到未被服务端确认（响应体缺少 {self.success_field} 字段），"
+                        f"状态码: {status}, 返回: {response.text}"
+                    )
                 return False
+
+            self.logger.info(f"✅ 签到成功！当前提交坐标：[{lng:.6f}, {lat:.6f}]")
+            return True
 
         except Exception as e:
             self.logger.error(f"❌ 签到请求发生异常: {e}")
             return False
+
+    def probe_sign_response(self, response: Any) -> bool:
+        """判断一个签到响应是否代表成功（供外部/测试复用）。
+
+        参数:
+            response: ``requests`` 的响应对象。
+
+        返回:
+            状态码正常且响应体含成功标志字段时返回 True。
+        """
+        try:
+            status = int(getattr(response, "status_code", 0))
+        except (TypeError, ValueError):
+            return False
+        if not 200 <= status < 300:
+            return False
+        return response_contains_field(response, self.success_field)
 
     def _calculate_jittered_coordinates(
         self, base_lng: float, base_lat: float

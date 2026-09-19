@@ -13,6 +13,8 @@ from unittest.mock import MagicMock
 # Add src to path before importing package
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import logging
+
 import pytest
 
 from fafu_auto_sign.client import FAFUClient
@@ -25,6 +27,9 @@ def mock_config():
     """为测试创建mock配置。"""
     config = MagicMock(spec=AppConfig)
     config.jitter = 0.00005
+    # 成功判定字段从配置读取，mock 配置必须显式给出；
+    # 否则 MagicMock 会返回一个非字符串属性，判定会退化为「永假」。
+    config.sign_success_field = "timestamp"
     return config
 
 
@@ -49,7 +54,8 @@ class TestSubmitSign:
         # 准备
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.text = '{"code": 200, "message": "success"}'
+        mock_response.text = '{"timestamp": 1789118122, "code": 200, "message": "success"}'
+        mock_response.json.return_value = {"timestamp": 1789118122}
         mock_client.post.return_value = mock_response
 
         # 执行
@@ -81,6 +87,8 @@ class TestSubmitSign:
         # 准备
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.text = '{"timestamp": 1789118122}'
+        mock_response.json.return_value = {"timestamp": 1789118122}
         mock_client.post.return_value = mock_response
 
         # 执行
@@ -106,6 +114,8 @@ class TestSubmitSign:
         """关闭图片上传时，签到请求不应携带 signImg 参数。"""
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.text = '{"timestamp": 1789118122}'
+        mock_response.json.return_value = {"timestamp": 1789118122}
         mock_client.post.return_value = mock_response
 
         result = sign_service.submit_sign(123, 516208, 118.237686, 25.077727)
@@ -119,6 +129,8 @@ class TestSubmitSign:
         # 准备
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.text = '{"timestamp": 1789118122}'
+        mock_response.json.return_value = {"timestamp": 1789118122}
         mock_client.post.return_value = mock_response
 
         # 执行
@@ -152,6 +164,8 @@ class TestGPSJitter:
         # 准备
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.text = '{"timestamp": 1789118122}'
+        mock_response.json.return_value = {"timestamp": 1789118122}
         mock_client.post.return_value = mock_response
 
         base_lng = 118.237686
@@ -183,6 +197,8 @@ class TestGPSJitter:
         # 准备
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.text = '{"timestamp": 1789118122}'
+        mock_response.json.return_value = {"timestamp": 1789118122}
         mock_client.post.return_value = mock_response
 
         coordinates = []
@@ -221,6 +237,114 @@ class TestGPSJitter:
         assert abs(lat - base_lat) <= jitter
 
 
+class TestSuccessCriterion:
+    """签到成功判定：必须看响应体，不能只看 HTTP 状态码。"""
+
+    def test_http_200_with_error_body_is_not_success(self, sign_service, mock_client, caplog):
+        """HTTP 200 但业务失败（响应体无 timestamp）必须判为失败。
+
+        这是「只看状态码」的经典误报场景：服务端可能返回 200 而业务上被
+        风控拦截或任务已失效，此时若报成功会让使用者以为签到完成。
+        """
+        caplog.set_level(logging.ERROR)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = '{"errorCode": "41567", "errorMessage": "Get authorization username fail"}'
+        mock_response.json.return_value = {
+            "errorCode": "41567",
+            "errorMessage": "Get authorization username fail",
+        }
+        mock_client.post.return_value = mock_response
+
+        result = sign_service.submit_sign(123, 516208, 118.237686, 25.077727)
+
+        assert result is False
+        assert "未被服务端确认" in caplog.text
+
+    def test_http_200_with_html_body_is_not_success(self, sign_service, mock_client):
+        """被 WAF 拦截返回的 HTML 页面不能判为成功。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html><body>Request blocked</body></html>"
+        mock_response.json.side_effect = ValueError("not json")
+        mock_client.post.return_value = mock_response
+
+        assert sign_service.submit_sign(123, 516208, 118.237686, 25.077727) is False
+
+    def test_probe_accepts_2xx_with_timestamp(self, sign_service):
+        """2xx 且响应体含 timestamp 视为成功。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {"timestamp": 1789118122}
+
+        assert sign_service.probe_sign_response(mock_response) is True
+
+    def test_probe_rejects_non_2xx(self, sign_service):
+        """非 2xx 一律视为失败。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 302
+        mock_response.json.return_value = {"timestamp": 1789118122}
+
+        assert sign_service.probe_sign_response(mock_response) is False
+
+    def test_probe_rejects_non_numeric_status(self, sign_service):
+        """状态码不是数字时按失败处理，不抛异常。"""
+        mock_response = MagicMock()
+        mock_response.status_code = "not-a-status"
+
+        assert sign_service.probe_sign_response(mock_response) is False
+
+
+class TestConfigurableSuccessField:
+    """成功判定字段可配置。
+
+    该判据来自跨项目逆向记录、未用真实响应验证，因此必须留出配置逃生口：
+    若服务端返回结构不同，改配置即可，不用改代码。
+    """
+
+    @staticmethod
+    def _response(payload):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = str(payload)
+        mock_response.json.return_value = payload
+        return mock_response
+
+    def test_custom_field_is_used(self, mock_client, mock_config):
+        """配置了自定义字段名后，响应体含该字段即算成功。"""
+        mock_config.sign_success_field = "ok"
+        mock_client.post.return_value = self._response({"ok": True})
+        service = SignService(mock_client, mock_config)
+
+        assert service.success_field == "ok"
+        assert service.submit_sign(123, 516208, 118.237686, 25.077727) is True
+
+    def test_default_field_is_rejected_when_custom_configured(self, mock_client, mock_config):
+        """配置了自定义字段后，旧的 timestamp 不再被认作成功。"""
+        mock_config.sign_success_field = "ok"
+        mock_client.post.return_value = self._response({"timestamp": 1789118122})
+        service = SignService(mock_client, mock_config)
+
+        assert service.submit_sign(123, 516208, 118.237686, 25.077727) is False
+
+    def test_falls_back_to_default_when_config_lacks_field(self, mock_client):
+        """配置对象没有该属性时回退到默认字段，不静默失效。"""
+        from types import SimpleNamespace
+
+        service = SignService(mock_client, SimpleNamespace(jitter=0.00005))
+
+        assert service.success_field == "timestamp"
+
+    def test_falls_back_to_default_when_field_is_not_a_string(self, mock_client, mock_config):
+        """配置值类型异常时回退到默认字段，避免判定退化为「永假」。"""
+        mock_config.sign_success_field = 12345
+
+        service = SignService(mock_client, mock_config)
+
+        assert service.success_field == "timestamp"
+
+
 class TestErrorHandling:
     """错误处理场景测试。"""
 
@@ -240,12 +364,12 @@ class TestErrorHandling:
     def test_submit_sign_logs_success_message(self, sign_service, mock_client, caplog):
         """测试成功消息被记录。"""
         # 准备
-        import logging
-
         caplog.set_level(logging.INFO)
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.text = '{"timestamp": 1789118122}'
+        mock_response.json.return_value = {"timestamp": 1789118122}
         mock_client.post.return_value = mock_response
 
         # 执行

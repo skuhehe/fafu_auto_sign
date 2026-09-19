@@ -68,7 +68,8 @@ class TestIntegrationWorkflow:
         # Mock签到响应
         mock_sign_response = Mock()
         mock_sign_response.status_code = 200
-        mock_sign_response.json.return_value = {"success": True}
+        # 成功判定依据响应体含 timestamp 字段（见 SignService.DEFAULT_SUCCESS_FIELD）
+        mock_sign_response.json.return_value = {"timestamp": 1789118122}
 
         mock_session.request.side_effect = [
             mock_task_response,
@@ -151,7 +152,8 @@ class TestIntegrationWorkflow:
         # Mock签到响应（两个任务各签到一次）
         mock_sign_response = Mock()
         mock_sign_response.status_code = 200
-        mock_sign_response.json.return_value = {"success": True}
+        # 成功判定依据响应体含 timestamp 字段（见 SignService.DEFAULT_SUCCESS_FIELD）
+        mock_sign_response.json.return_value = {"timestamp": 1789118122}
 
         # 按请求顺序设置 side_effect：任务列表 -> 任务123详情 -> 上传 -> 签到 -> 任务456详情 -> 上传 -> 签到
         mock_session.request.side_effect = [
@@ -306,7 +308,8 @@ class TestMainModuleIntegration:
 
                 from fafu_auto_sign.main import run
 
-                run(str(config_file))
+                # 状态文件走 tmp_path，避免污染项目根目录的真实 state.json
+                run(str(config_file), state_path=str(tmp_path / "state.json"))
 
 
 class TestConfigIntegration:
